@@ -7,12 +7,15 @@ const TGAColor white = TGAColor(255, 255, 255, 255);
 const TGAColor red = TGAColor(255, 0, 0, 255);
 const TGAColor green = TGAColor(0, 255, 0, 255);
 const TGAColor blue = TGAColor(0, 0, 255, 255);
-const vec3 light_dir = vec3(0.0, 0.0, -1.0);
+const vec3 light_dir = vec3(0.0, 0.0, 1.0);
 const int width = 800;
 const int height = 800;
+const int depth = 255;
 
-TGAImage *diffuse;
+vec3 eye(1, 1, 3);
+vec3 center(0, 0, 0);
 
+Model* model;
 //void line(int x0, int y0, int x1, int y1, TGAImage& image, TGAColor color)
 //{
 //    for (float t = 0; t < 1; t += 0.01)
@@ -129,7 +132,7 @@ vec3 barycentric(vec3 A, vec3 B, vec3 C, vec3 P)
         return vec3(1.f - (u.x + u.y) / u.z, u.y / u.z, u.x / u.z);
     return vec3(-1, 1, 1); // in this case generate negative coordinates, it will be thrown away by the rasterizator
 }
-void triangle(vec3* pts,vec2*uvs, float *zbuffer, TGAImage& image, TGAColor color)
+void triangle(vec3* pts, vec2* uvs, float* intensities, float* zbuffer, TGAImage& image)
 {
     vec2 bboxmin(image.get_width() - 1, image.get_height() - 1);
     vec2 bboxmax(0, 0);
@@ -152,28 +155,32 @@ void triangle(vec3* pts,vec2*uvs, float *zbuffer, TGAImage& image, TGAColor colo
             if (bc.x < 0 || bc.y < 0 || bc.z < 0) continue;
             p.z = 0;
             vec2 uv;
+            float intensity = 0;
             for (int i = 0; i < 3; i++)
             {
                 p.z += bc[i] * pts[i][2];
                 uv.x += bc[i] * uvs[i].x;
                 uv.y += bc[i] * uvs[i].y;
+                intensity += bc[i] * intensities[i];
             }
-
-            if (zbuffer[int(p.x + p.y * width)] < p.z)
+            if (intensity < 0)
+                continue;
+            int idx = p.x + p.y * width;
+            if (zbuffer[idx] < p.z)
             {
-                TGAColor diffuseColor = diffuse->get((int)(uv.x * diffuse->get_width()), (int)(uv.y * diffuse->get_height()));
-                zbuffer[int(p.x + p.y * width)] = p.z;
-                image.set(p.x, p.y, diffuseColor);
+                TGAColor diffuseColor = model->diffuse(uv);
+                zbuffer[idx] = p.z;
+                image.set(p.x, p.y, diffuseColor * intensity);
             }
         }
     }
 }
 
 vec3 world2screen(vec3 v) {
-    return vec3(int((v.x + 1.) * width / 2. + .5), int((v.y + 1.) * height / 2. + .5), v.z);
+    return vec3(int((v.x + 1.) * width / 2.), int((v.y + 1.) * height / 2.), (int)((v.z +1.0) * depth/2.0));
 }
 
-mat<4, 1> ToHomogeneous(vec3 v)
+mat<4, 1> v2m(vec3 v)
 {
     mat<4, 1> mat;
     mat[0][0] = v.x;
@@ -184,14 +191,46 @@ mat<4, 1> ToHomogeneous(vec3 v)
     return mat;
 }
 
-vec3 FromHomogeneous(mat<4, 1> m)
+vec3 m2v(mat<4, 1> m)
 {
-    return vec3(m[0][0] / m[3][0], m[1][0] / m[3][0], m[2][0] / m[3][0]);
+    return vec3((int)(m[0][0] / m[3][0]), (int)(m[1][0] / m[3][0]), (m[2][0] / m[3][0]));
+}
+
+mat<4, 4> lookAt(vec3 eye, vec3 center, vec3 up)
+{
+    vec3 z = (eye - center).normalize();
+    vec3 x = cross(up, z).normalize();
+    vec3 y = cross(z, x).normalize();
+    mat<4, 4> res = mat<4, 4>::identity();
+    for (int i = 0; i < 3; i++)
+    {
+        res[0][i] = x[i];
+        res[1][i] = y[i];
+        res[2][i] = z[i];
+        res[i][3] = -center[i];
+    }
+
+    return res;
+}
+
+mat<4, 4> viewport(int x, int y, int width, int height, int depth)
+{
+    mat<4, 4> m = mat<4, 4>::identity();
+
+    m[0][3] = x + width / 2.0f;
+    m[1][3] = y + height / 2.0f;
+    m[2][3] = depth/2.0;
+
+    m[0][0] = width / 2.0f;
+    m[1][1] = height / 2.0f;
+    m[2][2] = depth / 2.0;
+
+    return m;
 }
 
 int main(int argc, char** argv)
 {
-    Model *model;
+
     if (argc == 2)
     {
         model = new Model(argv[1]);
@@ -204,39 +243,31 @@ int main(int argc, char** argv)
     for (int i = width * height; i--; i > 0)
         zbuffer[i] = -std::numeric_limits<float>::max();
 
-    mat<4, 4> perspective = mat<4, 4>::identity();
-    perspective[3][2] = -1.0f / 15.0f;
-    diffuse = new TGAImage();
-    diffuse->read_tga_file("obj/african_head/african_head_diffuse.tga");
-    diffuse->flip_vertically();
+    mat<4, 4> modelView = lookAt(eye, center, vec3(0, 1, 0));
+    mat<4, 4> projection = mat<4, 4>::identity();
+    projection[3][2] = -1.0f / (eye-center).norm();
+    mat<4, 4> vp = viewport(0, 0, width, height,depth);
     TGAImage image(width, height, TGAImage::RGB);
     for (int i = 0; i < model->nfaces(); i++)
     {
         vec3 screen_cords[3];
         vec3 world_coords[3];
         vec2 uvs[3];
+        float intensity[3];
         for (int j = 0; j < 3; j++)
         {
             vec3 v = model->vert(i, j);
             uvs[j] = model->uv(i, j);
-            mat<4, 1> projected = perspective * ToHomogeneous(v);
-            vec3 proejctedV = FromHomogeneous(projected);
-            screen_cords[j] = world2screen(proejctedV);
+            mat<4, 1> m = vp * projection * modelView * v2m(v);
+            vec3 v1 = m2v(m);
+            screen_cords[j] = v1;
             world_coords[j] = v;
+            intensity[j] = model->normal(i, j) * light_dir;
         }
-        vec3 normal = cross(world_coords[2] - world_coords[0], world_coords[1] - world_coords[0]);
-        normal.normalize();
-        float intensitiy = normal* light_dir;
-        if (intensitiy > 0)
-        {
-            triangle(screen_cords, uvs, zbuffer, image, TGAColor(intensitiy * 255, intensitiy * 255, intensitiy * 255, 255));
-        }
-    }
-    //line(vec2(20, 34), vec2(744, 400), image, red);
-    //line(vec2(120, 434), vec2(444, 400), image, green);
-    //line(vec2(330, 463), vec2(594, 200), image, blue);
 
-    //line(vec2(10, 10), vec2(790, 10), image, white);
+        triangle(screen_cords, uvs,intensity, zbuffer, image);
+    }
+
     image.write_tga_file("output.tga");
     std::cout << "Hello World!\n";
     return 0;
