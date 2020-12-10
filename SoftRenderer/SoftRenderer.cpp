@@ -3,16 +3,17 @@
 #include "tgaimage.h"
 #include <iostream>
 #include "model.h"
+#include "gl.h"
 const TGAColor white = TGAColor(255, 255, 255, 255);
 const TGAColor red = TGAColor(255, 0, 0, 255);
 const TGAColor green = TGAColor(0, 255, 0, 255);
 const TGAColor blue = TGAColor(0, 0, 255, 255);
-const vec3 light_dir = vec3(0.0, 0.0, 1.0);
+const vec3 light_dir = vec3(1.0, 1.0, 1.0);
 const int width = 800;
 const int height = 800;
 const int depth = 255;
 
-vec3 eye(1, 1, 3);
+vec3 eye(1,1, 3);
 vec3 center(0, 0, 0);
 
 Model* model;
@@ -86,151 +87,44 @@ void line(vec2 v1, vec2 v2, TGAImage& image, const TGAColor& color)
     line(v1.x, v1.y, v2.x, v2.y, image, color);
 }
 
-//void triangle(vec2 t0, vec2 t1, vec2 t2, TGAImage &image, const TGAColor& color)
-//{
-//    if (t0.y > t1.y) std::swap(t0, t1);
-//    if (t0.y > t2.y) std::swap(t0, t2);
-//    if (t1.y > t2.y) std::swap(t1, t2);
-//    if (t0.y == t2.y) return;
-//    float totalHeight = t2.y - t0.y;
-//    float segmentHeight = t1.y - t0.y;
-//    for (int y = t0.y; y < t1.y; y++)
-//    {
-//        float alpha = (y - t0.y) / totalHeight;
-//        float beta = (y - t0.y) / segmentHeight;
-//
-//        line(t0.x + (t2.x - t0.x) * alpha, y, t0.x + (t1.x - t0.x) * beta, y, image, color);
-//    }
-//    segmentHeight = t2.y - t1.y;
-//    for (int y = t1.y; y < t2.y; y++)
-//    {
-//        float alpha = (y - t0.y) / totalHeight;
-//        float beta = (y - t1.y) / segmentHeight;
-//
-//        line(t0.x + (t2.x - t0.x) * alpha, y, t1.x + (t2.x - t1.x) * beta, y, image, color);
-//    }
-//}
-
-vec3 barycentric(vec3* pts, vec3 p)
+class Shader : public IShader
 {
-    vec3 u = cross(vec3(pts[1][0] - pts[0][0], pts[2][0] - pts[0][0], pts[0][0] - p[0]),
-        vec3(pts[1][1] - pts[0][1], pts[2][1] - pts[0][1], pts[0][1] - p[1]));
-    if (std::abs(u[2] < 1e-2)) return vec3(-1, 1, 1);
-    return vec3(1.0 - (u.x + u.y) / u.z, u.x / u.z, u.y / u.z);
-}
-
-vec3 barycentric(vec3 A, vec3 B, vec3 C, vec3 P)
-{
-    vec3 s[2];
-    for (int i = 2; i--; ) {
-        s[i][0] = C[i] - A[i];
-        s[i][1] = B[i] - A[i];
-        s[i][2] = A[i] - P[i];
-    }
-    vec3 u = cross(s[0], s[1]);
-    if (std::abs(u[2]) > 1e-2) // dont forget that u[2] is integer. If it is zero then triangle ABC is degenerate
-        return vec3(1.f - (u.x + u.y) / u.z, u.y / u.z, u.x / u.z);
-    return vec3(-1, 1, 1); // in this case generate negative coordinates, it will be thrown away by the rasterizator
-}
-void triangle(vec3* pts, vec2* uvs, float* intensities, float* zbuffer, TGAImage& image)
-{
-    vec2 bboxmin(image.get_width() - 1, image.get_height() - 1);
-    vec2 bboxmax(0, 0);
-    vec2 clamp(image.get_width() - 1, image.get_height() - 1);
-    for (int i = 0; i < 3; i++)
+public:
+    //vec3 varying_intensities;
+    mat<2, 3> varying_uvs;
+    mat<3, 3> varyings_world_pos;
+    mat<4, 4> uniform_MIT;
+    vec4 vertex(int face, int vertex) override
     {
-        for (int j = 0; j < 2; j++)
-        {
-            bboxmin[j] = std::max(0.0, std::min(bboxmin[j], pts[i][j]));
-            bboxmax[j] = std::min(clamp[j], std::max(bboxmax[j], pts[i][j]));
-        }
+        vec3 v = model->vert(face, vertex);
+        //varyings_world_pos.set_col(vertex, v);
+        //varyings_world_pos.set_col(vertex, proj<3>(ModelView * embed<4>(v)));
+        varying_uvs.set_col(vertex, model->uv(face, vertex));
+        return Viewport * Projection * ModelView * embed<4>(v);
     }
 
-    vec3 p;
-    for (p.x = bboxmin.x; p.x <= bboxmax.x; p.x++)
+    bool fragment(vec3 bc, TGAColor &color) override
     {
-        for (p.y = bboxmin.y; p.y <= bboxmax.y; p.y++)
-        {
-            vec3 bc = barycentric(pts, p); //barycentric(pts[0], pts[1],pts[2], p);
-            if (bc.x < 0 || bc.y < 0 || bc.z < 0) continue;
-            p.z = 0;
-            vec2 uv;
-            float intensity = 0;
-            for (int i = 0; i < 3; i++)
-            {
-                p.z += bc[i] * pts[i][2];
-                uv.x += bc[i] * uvs[i].x;
-                uv.y += bc[i] * uvs[i].y;
-                intensity += bc[i] * intensities[i];
-            }
-            if (intensity < 0)
-                continue;
-            int idx = p.x + p.y * width;
-            if (zbuffer[idx] < p.z)
-            {
-                TGAColor diffuseColor = model->diffuse(uv);
-                zbuffer[idx] = p.z;
-                image.set(p.x, p.y, diffuseColor * intensity);
-            }
-        }
+        //float intensity = varying_intensities * bc;
+        //vec3 fragPos = varyings_world_pos * bc;
+        vec2 uv = varying_uvs *bc;
+        vec3 n = proj<3>(uniform_MIT * embed<4>(model->normal(uv), 0)).normalize();
+        vec3 l =  proj<3>(Projection * ModelView * embed<4>(light_dir)).normalize();
+        vec3 r = (2 * (l * n) * n - l).normalize();
+
+        float spec = pow(std::max(r.z, 0.0), model->specular(uv));
+        float diff = std::max(0.0, n * l);
+        TGAColor c = model->diffuse(uv);
+        color = c;
+        for (int i = 0; i < 3; i++) color[i] = std::min<float>(5 + c[i] * (diff + .6 * spec), 255);
+
+
+       return false;
     }
-}
-
-vec3 world2screen(vec3 v) {
-    return vec3(int((v.x + 1.) * width / 2.), int((v.y + 1.) * height / 2.), (int)((v.z +1.0) * depth/2.0));
-}
-
-mat<4, 1> v2m(vec3 v)
-{
-    mat<4, 1> mat;
-    mat[0][0] = v.x;
-    mat[1][0] = v.y;
-    mat[2][0] = v.z;
-    mat[3][0] = 1.0f;
-
-    return mat;
-}
-
-vec3 m2v(mat<4, 1> m)
-{
-    return vec3((int)(m[0][0] / m[3][0]), (int)(m[1][0] / m[3][0]), (m[2][0] / m[3][0]));
-}
-
-mat<4, 4> lookAt(vec3 eye, vec3 center, vec3 up)
-{
-    vec3 z = (eye - center).normalize();
-    vec3 x = cross(up, z).normalize();
-    vec3 y = cross(z, x).normalize();
-    mat<4, 4> res = mat<4, 4>::identity();
-    for (int i = 0; i < 3; i++)
-    {
-        res[0][i] = x[i];
-        res[1][i] = y[i];
-        res[2][i] = z[i];
-        res[i][3] = -center[i];
-    }
-
-    return res;
-}
-
-mat<4, 4> viewport(int x, int y, int width, int height, int depth)
-{
-    mat<4, 4> m = mat<4, 4>::identity();
-
-    m[0][3] = x + width / 2.0f;
-    m[1][3] = y + height / 2.0f;
-    m[2][3] = depth/2.0;
-
-    m[0][0] = width / 2.0f;
-    m[1][1] = height / 2.0f;
-    m[2][2] = depth / 2.0;
-
-    return m;
-}
+};
 
 int main(int argc, char** argv)
 {
-
     if (argc == 2)
     {
         model = new Model(argv[1]);
@@ -239,36 +133,30 @@ int main(int argc, char** argv)
     {
         model = new Model("obj/african_head/african_head.obj");
     }
-    float *zbuffer = new float[width * height];
-    for (int i = width * height; i--; i > 0)
-        zbuffer[i] = -std::numeric_limits<float>::max();
 
-    mat<4, 4> modelView = lookAt(eye, center, vec3(0, 1, 0));
-    mat<4, 4> projection = mat<4, 4>::identity();
-    projection[3][2] = -1.0f / (eye-center).norm();
-    mat<4, 4> vp = viewport(0, 0, width, height,depth);
+    lookat(eye, center, vec3(0, 1, 0));
+    projection((eye - center).norm());
+    viewport(0, 0, width, height, depth);
+
+    Shader shader;;
+    shader.uniform_MIT = (Projection * ModelView).invert_transpose();
+
     TGAImage image(width, height, TGAImage::RGB);
+    TGAImage depth(width, height, TGAImage::GRAYSCALE);
     for (int i = 0; i < model->nfaces(); i++)
     {
-        vec3 screen_cords[3];
-        vec3 world_coords[3];
-        vec2 uvs[3];
-        float intensity[3];
+        vec4 screen_cords[3];
+
         for (int j = 0; j < 3; j++)
         {
-            vec3 v = model->vert(i, j);
-            uvs[j] = model->uv(i, j);
-            mat<4, 1> m = vp * projection * modelView * v2m(v);
-            vec3 v1 = m2v(m);
-            screen_cords[j] = v1;
-            world_coords[j] = v;
-            intensity[j] = model->normal(i, j) * light_dir;
-        }
+            screen_cords[j] = shader.vertex(i, j);
 
-        triangle(screen_cords, uvs,intensity, zbuffer, image);
+        }
+        triangle(screen_cords, shader, image, depth);
     }
 
     image.write_tga_file("output.tga");
+    depth.write_tga_file("depth.tga");
     std::cout << "Hello World!\n";
     return 0;
 }
